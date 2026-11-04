@@ -121,3 +121,50 @@ h1 {
   text-align: center;
   margin-top: 1.5rem;
 }
+
+#task-due {
+  flex: 0 0 auto;
+  padding: 0.65rem 0.6rem;
+  border: 1px solid var(--surface-2);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  color-scheme: dark;
+}
+
+#task-due:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+@media (max-width: 520px) {
+  .add-form {
+    flex-wrap: wrap;
+  }
+  .add-form input[type="text"] {
+    flex-basis: 100%;
+  }
+}
+
+.task-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.task-item .due {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.task-item.overdue .due {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.task-item.done .due {
+  text-decoration: line-through;
+}
