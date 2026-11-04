@@ -391,8 +391,62 @@ function damage(att, def, mv) {
   return { dmg, e, crit };
 }
 
+/* ---------- Animaciones de ataque ---------- */
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const sideOf = m => (m === S.enemy ? 'enemy' : 'player');
+
+// Centro de un dibujo relativo al campo de batalla.
+function centerOf(side) {
+  const el = $(`#${side} .sprite`), field = $('#field');
+  if (!el || !field) return null;
+  const r = el.getBoundingClientRect(), f = field.getBoundingClientRect();
+  return { x: r.left - f.left + r.width / 2, y: r.top - f.top + r.height / 2 };
+}
+
+// Crea un efecto (bola, estallido…) dentro del campo y lo anima.
+function fx(cls, color, at, keyframes, ms) {
+  const el = document.createElement('div');
+  el.className = `fx ${cls}`;
+  el.style.setProperty('--fx', color);
+  el.style.left = `${at.x}px`;
+  el.style.top = `${at.y}px`;
+  $('#field').append(el);
+  return el.animate(keyframes, { duration: ms, easing: 'ease-out' }).finished.then(() => el.remove());
+}
+
+// Físico: embestida + estallido. Especial: bola que vuela. Estado: brillo en el objetivo.
+async function animateMove(a, d, mv) {
+  if (REDUCED) return;
+  const aSide = sideOf(a), dSide = sideOf(d), color = TYPE_COLOR[mv.type];
+  const from = centerOf(aSide), to = centerOf(dSide);
+  if (!from || !to) return;
+  const spr = $(`#${aSide} .sprite`);
+  if (mv.cat === 'F') {
+    const dx = (to.x - from.x) * 0.35, dy = (to.y - from.y) * 0.35;
+    await spr.animate([{ transform: 'translate(0,0)' }, { transform: `translate(${dx}px,${dy}px) scale(1.08)` }, { transform: 'translate(0,0)' }],
+      { duration: 320, easing: 'ease-in-out' }).finished;
+    fx('burst', color, to, [{ transform: 'translate(-50%,-50%) scale(.2)', opacity: 1 }, { transform: 'translate(-50%,-50%) scale(1.6)', opacity: 0 }], 300);
+  } else if (mv.cat === 'E') {
+    spr.animate([{ filter: 'brightness(1)' }, { filter: 'brightness(1.8)' }, { filter: 'brightness(1)' }], { duration: 420 });
+    await fx('orb', color, from, [
+      { transform: 'translate(-50%,-50%) scale(.5)' },
+      { transform: `translate(calc(-50% + ${to.x - from.x}px), calc(-50% + ${to.y - from.y}px)) scale(1.3)` }
+    ], 420);
+    fx('burst', color, to, [{ transform: 'translate(-50%,-50%) scale(.3)', opacity: 1 }, { transform: 'translate(-50%,-50%) scale(2)', opacity: 0 }], 320);
+  } else {
+    const target = mv.eff.target === 'self' ? aSide : dSide;
+    const t = $(`#${target} .sprite`);
+    await t.animate([
+      { filter: `drop-shadow(0 0 0 ${color})` },
+      { filter: `drop-shadow(0 0 14px ${color}) brightness(1.3)` },
+      { filter: `drop-shadow(0 0 0 ${color})` }
+    ], { duration: 550 }).finished;
+  }
+}
+
 async function attack(a, d, mv) {
-  await say(`${label(a)} usa ${mv.name}.`);
+  await say(`${label(a)} usa ${mv.name}.`, 300);
+  await animateMove(a, d, mv);
   if (Math.random() * 100 >= mv.acc) { await say('¡Pero falló!'); return; }
   const r = damage(a, d, mv);
   if (r.e === 0) { await say(`No afecta a ${label(d)}…`); return; }
@@ -406,7 +460,8 @@ async function attack(a, d, mv) {
 }
 
 async function useStatus(a, d, mv) {
-  await say(`${label(a)} usa ${mv.name}.`);
+  await say(`${label(a)} usa ${mv.name}.`, 300);
+  await animateMove(a, d, mv);
   const f = mv.eff;
   if (f.target === 'foe' && Math.random() * 100 >= mv.acc) return say('¡Pero falló!');
   if (f.heal) {
@@ -569,13 +624,13 @@ async function addToTeam(m) {
 async function onEnemyFaint() {
   const e = S.enemy, p = cur();
   if (e.boss) S.bosses++; else S.kills++;
-  const gain = Math.floor(SPECIES[e.id].exp * e.lvl / 4) * (e.boss ? 2 : 1);
+  const gain = Math.floor(SPECIES[e.id].exp * e.lvl / 2.5) * (e.boss ? 2 : 1);
   if (p.hp > 0) {
     await say(`${nm(p)} gana ${gain} PX.`);
     await gainXp(p, gain, true);
   }
   const others = S.team.filter(m => m !== p && m.hp > 0);
-  for (const m of others) await gainXp(m, Math.floor(gain / 2), false);
+  for (const m of others) await gainXp(m, Math.floor(gain * 0.6), false);
   if (others.length) await say('El resto del equipo también gana PX.', 500);
   await winWave(e.boss);
 }
@@ -634,7 +689,10 @@ async function startWave() {
   if (cur().hp <= 0) S.active = S.team.findIndex(m => m.hp > 0);
   for (const m of S.team) delete m.st;
   const boss = S.wave % 10 === 0;
-  const lvl = Math.min(100, S.wave + 2 + rnd(3) + (boss ? 5 : 0));
+  // Primeras 10 oleadas más suaves; después sube como antes.
+  const early = S.wave <= 10;
+  const baseLvl = early ? 2 + Math.floor(S.wave * 0.8) + rnd(2) : S.wave + rnd(3);
+  const lvl = Math.min(100, baseLvl + (boss ? (early ? 2 : 5) : 0));
   let id;
   if (boss) {
     // Antes de la oleada 30 el jefe es una forma final; después, un legendario.
@@ -645,7 +703,7 @@ async function startWave() {
     let x = Math.random() * pool.reduce((s, k) => s + WILD_WEIGHT[SPECIES[k].r], 0);
     id = pool.find(k => (x -= WILD_WEIGHT[SPECIES[k].r]) < 0) || pick(pool);
   }
-  S.enemy = makeMon(id, lvl, randIv(boss ? 15 : 0));
+  S.enemy = makeMon(id, lvl, boss ? randIv(15) : S.wave <= 5 ? STATS.map(() => rnd(16)) : randIv());
   S.enemy.boss = boss;
   updateCards();
   await say(boss ? `¡Oleada ${S.wave}: el JEFE ${nm(S.enemy)} aparece!` : `Oleada ${S.wave}: ¡un ${nm(S.enemy)} salvaje!`);
@@ -695,75 +753,198 @@ function shade(hex, amt) {
   return `rgb(${ch(n >> 16)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
 }
 
-const PX = 16; // tamaño de la cuadrícula
+const PX = 32; // tamaño de la cuadrícula
+const CX = 16; // eje de simetría
 
-// Devuelve una cuadrícula PX×PX de colores (null = vacío). Simétrica de izquierda a derecha.
+// Partes que no llevan luces ni sombras (ojos, boca…).
+const FLAT = new Set(['pupil', 'shine', 'mouth', 'fang', 'eyeR', 'gem']);
+
+// Devuelve una cuadrícula PX×PX de colores (null = vacío).
+// Diseño original: cabeza + cuerpo + patas + adornos según el tipo. La línea evolutiva comparte forma y crece.
 function pixelGrid(id) {
   const s = SPECIES[id];
   let root = id, stage = 0;
   while (SPECIES[root].preId) { root = SPECIES[root].preId; stage++; }
-  const body = mulberry32(Number(root) * 7919 + 17); // forma común de toda la línea evolutiva
-  const extra = mulberry32(Number(id) * 104729 + 3); // detalles propios de cada forma
-  const half = PX / 2;
-  const fill = Array.from({ length: PX }, () => Array(half).fill(false));
+  const R = mulberry32(Number(root) * 7919 + 17);   // proporciones comunes de la línea
+  const X = mulberry32(Number(id) * 104729 + 3);    // detalles de esta forma
+  const types = s.types, has = t => types.includes(t);
+  const g = Array.from({ length: PX }, () => Array(PX).fill(0));
 
-  // Cuerpo: elipse que crece con cada evolución + borde irregular + púas.
-  const rx = 3.2 + body() * 1.6 + stage * 0.8;
-  const ry = 3.6 + body() * 1.8 + stage * 0.8;
-  const cy = 8 + body() * 1.5 + (stage ? 0 : 1);
-  const spikes = 0.08 + body() * 0.1 + stage * 0.07;
-  for (let y = 1; y < PX - 1; y++) {
-    for (let x = 1; x < half; x++) {
-      const dx = (x + 0.5 - half) / rx, dy = (y + 0.5 - cy) / ry;
-      const d = dx * dx + dy * dy;
-      fill[y][x] = d < 0.65 || (d < 1.15 && body() < 0.7) || (d < 1.9 && extra() < spikes);
+  // --- Herramientas de dibujo (coordenadas continuas, centro de píxel = x + 0.5) ---
+  const put = (x, y, m, on) => {
+    if (x < 1 || y < 1 || x >= PX - 1 || y >= PX - 1) return;
+    if (on && !on.includes(g[y][x])) return;
+    g[y][x] = m;
+  };
+  const ellipse = (cx, cy, rx, ry, m, on) => {
+    for (let y = 0; y < PX; y++) for (let x = 0; x < PX; x++) {
+      const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry;
+      if (dx * dx + dy * dy <= 1) put(x, y, m, on);
     }
+  };
+  const tri = (ax, ay, bx, by, cx, cy, m, on) => {
+    const sgn = (px, py, x1, y1, x2, y2) => (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2);
+    for (let y = 0; y < PX; y++) for (let x = 0; x < PX; x++) {
+      const px = x + 0.5, py = y + 0.5;
+      const d1 = sgn(px, py, ax, ay, bx, by), d2 = sgn(px, py, bx, by, cx, cy), d3 = sgn(px, py, cx, cy, ax, ay);
+      if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) put(x, y, m, on);
+    }
+  };
+  const rect = (x0, y0, x1, y1, m, on) => {
+    for (let y = Math.round(y0); y <= Math.round(y1); y++) for (let x = Math.round(x0); x <= Math.round(x1); x++) put(x, y, m, on);
+  };
+
+  // --- Proporciones (se reducen si no caben) ---
+  const ghost = has('Fantasma');
+  const oneBlob = R() < 0.3;
+  const legs = ghost ? 0 : 2 + R() * 3;
+  const bodyRx0 = 5.5 + R() * 3, bodyRy0 = 5 + R() * 2.5, headR0 = 4.4 + R() * 1.8;
+  const bigEyes = R() < 0.55;
+  let k = 0.82 + stage * 0.17, dims;
+  for (;;) {
+    const legLen = Math.round(legs * k), bodyRx = bodyRx0 * k, bodyRy = bodyRy0 * k;
+    const bodyCy = 29.5 - legLen - bodyRy;
+    const hr = oneBlob ? 0 : headR0 * k;
+    const headCy = oneBlob ? bodyCy - bodyRy * 0.25 : bodyCy - bodyRy * 0.7 - hr * 0.45;
+    const top = oneBlob ? bodyCy - bodyRy : headCy - hr;
+    dims = { legLen, bodyRx, bodyRy, bodyCy, hr, headCy, top };
+    if (top >= 7 || k < 0.5) break;
+    k -= 0.04;
   }
-  // Patas (a veces).
-  if (body() < 0.75) {
-    const lx = Math.max(2, Math.round(half - rx * 0.6));
-    for (let y = Math.round(cy + ry * 0.6); y < PX - 1; y++) fill[y][lx] = true;
+  const { legLen, bodyRx, bodyRy, bodyCy, hr, headCy, top } = dims;
+  // Zona donde van ojos y adornos (cabeza o parte alta del cuerpo).
+  const fx = oneBlob ? bodyRx * 0.9 : hr, fy = oneBlob ? bodyCy - bodyRy * 0.35 : headCy;
+
+  // Detrás: alas.
+  if (has('Volador') || (has('Dragón') && stage > 0) || has('Hada') || has('Bicho') && X() < 0.5) {
+    const big = has('Volador') || has('Dragón');
+    const wy = bodyCy - bodyRy * 0.3;
+    tri(CX - bodyRx * 0.3, wy, CX - bodyRx - (big ? 7 : 4) * k, wy - (big ? 7 : 5) * k, CX - bodyRx - (big ? 3 : 2) * k, wy + bodyRy * 0.6, 'wing');
   }
-  // Orejas o cuernos (a veces).
-  if (body() < 0.5) {
-    const ex = Math.max(2, Math.round(half - rx * 0.5)), top = Math.max(1, Math.round(cy - ry - 1));
-    for (let y = top; y < cy - ry + 1.5; y++) fill[y][ex] = true;
+  // Patas con pies.
+  if (legLen > 0) {
+    const lx = CX - bodyRx * 0.5;
+    rect(lx - 1.2 * k, bodyCy + bodyRy * 0.5, lx + 1.2 * k, 29.5, 'body');
+    ellipse(lx - 0.5, 29.2, 2.2 * k, 1.2, 'body');
   }
-  // Quita píxeles sueltos (sin vecinos).
-  const on = (x, y) => y >= 0 && y < PX && x >= 0 && x < half && fill[y][x];
-  for (let y = 0; y < PX; y++) for (let x = 0; x < half; x++) {
-    if (fill[y][x] && !on(x - 1, y) && !on(x + 1, y) && !on(x, y - 1) && !on(x, y + 1) && x !== half - 1) fill[y][x] = false;
+  // Cuerpo, barriga y brazos.
+  ellipse(CX, bodyCy, bodyRx, bodyRy, 'body');
+  if (ghost) { // borde inferior ondulado
+    for (let y = Math.round(bodyCy + bodyRy * 0.55); y < PX; y++) for (let x = 0; x < CX; x++) if ((x + y) % 4 < 2) g[y][x] = 0;
+  }
+  ellipse(CX, bodyCy + bodyRy * 0.25, bodyRx * 0.58, bodyRy * 0.6, 'belly', ['body']);
+  const armR = (has('Lucha') ? 2.8 : 1.7) * k;
+  ellipse(CX - bodyRx * 0.95, bodyCy + bodyRy * 0.1, armR, armR * 1.2, 'body');
+  if (has('Lucha')) ellipse(CX - bodyRx * 1.05, bodyCy + bodyRy * 0.35, armR * 0.8, armR * 0.8, 'acc');
+  // Cabeza.
+  if (!oneBlob) ellipse(CX, headCy, hr * 1.08, hr, 'body');
+
+  // Adornos según tipo (1.º y 2.º tipo).
+  const deco = t => {
+    const ty = fy - (oneBlob ? bodyRy * 0.6 : hr * 0.75);
+    switch (t) {
+      case 'Normal': case 'Siniestro': case 'Eléctrico': // orejas
+        tri(CX - fx * 0.95, ty + 1.5, CX - fx * 0.3, ty, CX - fx * 0.9, ty - 5 * k, 'body');
+        tri(CX - fx * 0.82, ty + 0.8, CX - fx * 0.5, ty + 0.2, CX - fx * 0.85, ty - 3.2 * k, t === 'Eléctrico' ? 'acc2' : 'belly');
+        break;
+      case 'Dragón': case 'Tierra': case 'Roca': case 'Acero': // cuernos
+        tri(CX - fx * 0.55, ty + 1.5, CX - fx * 0.2, ty + 1.2, CX - fx * 0.7, ty - 4.5 * k, t === 'Acero' ? 'metal' : 'horn');
+        break;
+      case 'Planta': // hoja con tallo
+        rect(CX - 0.5, ty - 1.5 * k, CX - 0.5, ty + 0.5, 'stem');
+        ellipse(CX - 2.2 * k, ty - 2.5 * k, 2.4 * k, 1.4 * k, 'leaf');
+        if (stage > 1) ellipse(CX, ty - 4 * k, 1.8 * k, 1.8 * k, 'petal');
+        break;
+      case 'Fuego': // llama
+        tri(CX - 2.8 * k, ty + 1.5, CX + 2.8 * k, ty + 1.5, CX - 0.5, ty - (5 + stage) * k, 'flame');
+        tri(CX - 1.4 * k, ty + 1.5, CX + 1.4 * k, ty + 1.5, CX - 0.2, ty - 2.5 * k, 'flame2');
+        break;
+      case 'Agua': // aleta en la cabeza y a los lados
+        tri(CX - 1.4, ty + 1.5, CX + 1.4, ty + 1.5, CX, ty - 4 * k, 'acc');
+        tri(CX - fx * 0.95, fy, CX - fx * 0.95, fy + 2.5 * k, CX - fx - 3 * k, fy - 1.5 * k, 'acc');
+        break;
+      case 'Hielo': // cristales
+        tri(CX - 2.2, ty + 1.5, CX - 0.2, ty + 1.5, CX - 1.5, ty - 4.5 * k, 'ice');
+        tri(CX - fx * 0.7, ty + 2, CX - fx * 0.3, ty + 1.5, CX - fx * 0.75, ty - 2.5 * k, 'ice');
+        break;
+      case 'Bicho': { // antenas
+        const ax = CX - fx * 0.35, tx = CX - fx * 0.85, tyy = ty - 4.5 * k;
+        for (let i = 0; i <= 6; i++) put(Math.floor(ax + (tx - ax) * i / 6), Math.floor(ty + 1 + (tyy - ty - 1) * i / 6), 'acc2');
+        ellipse(tx, tyy, 1.2, 1.2, 'acc');
+        break;
+      }
+      case 'Fantasma': // pico de pelo
+        tri(CX - fx * 0.6, ty + 1.5, CX + 0.5, ty + 1, CX - fx * 0.2, ty - 3.5 * k, 'body');
+        break;
+      case 'Psíquico': // gema en la frente
+        rect(CX - 1, fy - fx * 0.62, CX, fy - fx * 0.45, 'gem');
+        break;
+      case 'Hada': // lazo
+        ellipse(CX - 2 * k, ty, 2 * k, 1.4 * k, 'petal');
+        break;
+      case 'Veneno': // manchas
+        for (let i = 0; i < 4; i++) ellipse(CX - 1 - X() * bodyRx * 0.9, bodyCy - bodyRy * 0.5 + X() * bodyRy * 0.8, 1, 1, 'acc', ['body']);
+        break;
+      case 'Lucha': // cinta
+        rect(CX - fx - 1, fy - fx * 0.55, CX, fy - fx * 0.4, 'band', ['body']);
+        break;
+      case 'Volador': // cresta
+        tri(CX - 1, ty + 1.5, CX + 1, ty + 1.5, CX - 2.5 * k, ty - 4 * k, 'acc');
+        break;
+    }
+  };
+  deco(types[0]);
+  if (types[1] && types[1] !== types[0]) deco(types[1]);
+  // Rayas para Eléctrico y Siniestro.
+  if (has('Eléctrico') || has('Siniestro')) {
+    for (const yy of [bodyCy - bodyRy * 0.45, bodyCy - bodyRy * 0.05]) rect(CX - bodyRx, yy, CX - bodyRx * 0.55, yy + 0.4, 'acc2', ['body']);
   }
 
-  // Colores: arriba claro, abajo el 2.º tipo (o tono oscuro), manchas al azar.
-  const c1 = TYPE_COLOR[s.types[0]];
-  const c2 = TYPE_COLOR[s.types[1] || s.types[0]];
-  const dual = s.types.length > 1;
-  const grid = Array.from({ length: PX }, () => Array(PX).fill(null));
-  for (let y = 0; y < PX; y++) {
-    for (let x = 0; x < half; x++) {
-      if (!fill[y][x]) continue;
-      let col;
-      if (y > cy + 1 && dual) col = shade(c2, -0.05);
-      else if (y > cy + 1) col = shade(c1, x > half - 3 ? 0.35 : -0.15); // barriga clara
-      else col = shade(c1, y < cy - ry * 0.4 ? 0.2 : 0);
-      if (extra() < 0.07) col = shade(dual ? c2 : c1, -0.35);
-      grid[y][x] = col;
-      grid[y][PX - 1 - x] = col;
-    }
-  }
-  // Ojos y boca.
-  const ey = clamp(Math.round(cy - ry * 0.35), 2, PX - 4);
-  const ex = clamp(Math.round(half - 1 - rx * 0.45), 2, half - 2);
-  for (const [x, y, col] of [[ex, ey, '#ffffff'], [ex + 1, ey, '#111111'], [half - 1, ey + 2, '#3a1010']]) {
-    grid[y][x] = col;
-    grid[y][PX - 1 - x] = col;
-  }
-  // Contorno oscuro alrededor.
-  const out = grid.map(r => [...r]);
+  // Ojos, boca y colmillos.
+  const ey = Math.round(fy - fx * 0.1), ex = Math.round(CX - fx * 0.48);
+  const evil = has('Siniestro') || has('Fantasma');
+  const eh = bigEyes ? 2 : 1;
+  rect(ex - 1, ey - eh + 1, ex, ey + 1, evil ? 'eyeR' : 'pupil');
+  put(ex - 1, ey - eh + 1, 'shine');
+  if (evil || has('Dragón')) rect(ex - 1, ey - eh, ex + 1, ey - eh, 'mouth'); // ceja enfadada
+  const my = ey + 2 + (bigEyes ? 1 : 0);
+  rect(CX - 1, my, CX - 1, my, 'mouth');
+  if (has('Siniestro') || has('Dragón') || X() < 0.25) put(CX - 2, my + 1, 'fang');
+
+  // Simetría: copia la mitad izquierda en la derecha.
+  for (let y = 0; y < PX; y++) for (let x = 0; x < CX; x++) g[y][PX - 1 - x] = g[y][x];
+
+  // --- Colores ---
+  const c1 = TYPE_COLOR[types[0]], c2 = TYPE_COLOR[types[1] || types[0]], dual = types.length > 1;
+  const PAL = {
+    body: c1,
+    belly: dual && X() < 0.5 ? shade(c2, 0.35) : shade(c1, 0.5),
+    acc: dual ? c2 : shade(c1, -0.35),
+    acc2: shade(c1, -0.6),
+    wing: dual ? shade(c2, 0.15) : shade(c1, 0.3),
+    horn: '#efe6d2', metal: '#cbd5e1', stem: '#2f7d3a', leaf: '#46c45f', petal: '#f9a8d4',
+    flame: '#f97316', flame2: '#fde047', ice: '#bae6fd', gem: '#ef4444', band: '#dc2626',
+    pupil: '#111827', shine: '#ffffff', mouth: '#3b0d0d', fang: '#ffffff', eyeR: '#dc2626'
+  };
+  const at = (x, y) => (y >= 0 && y < PX && x >= 0 && x < PX ? g[y][x] : 0);
+  const out = Array.from({ length: PX }, () => Array(PX).fill(null));
   for (let y = 0; y < PX; y++) for (let x = 0; x < PX; x++) {
-    if (grid[y][x]) continue;
-    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([a, b]) => grid[y + b]?.[x + a])) out[y][x] = '#14141c';
+    const m = g[y][x];
+    if (m) {
+      const base = PAL[m];
+      if (FLAT.has(m)) { out[y][x] = base; continue; }
+      // Luz desde arriba a la izquierda, sombra abajo a la derecha, sombra suave bajo otra parte.
+      let amt = 0;
+      if (!at(x, y - 1) || !at(x - 1, y)) amt = 0.25;
+      else if (!at(x, y + 1) || !at(x + 1, y) || !at(x + 1, y + 1)) amt = -0.28;
+      else if (at(x, y - 1) !== m && !FLAT.has(at(x, y - 1))) amt = -0.14;
+      else if (y > bodyCy + bodyRy * 0.3) amt = -0.08;
+      out[y][x] = amt ? shade(base, amt) : base;
+    } else {
+      // Contorno: tono muy oscuro del vecino.
+      const n = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([a, b]) => at(x + a, y + b)).find(v => v && !FLAT.has(v));
+      if (n) out[y][x] = shade(PAL[n], -0.72);
+    }
   }
   return out;
 }
@@ -861,12 +1042,33 @@ const monOption = m => ({
   sub: `${SPECIES[m.id].types.join('/')} · PS ${m.hp}/${m.maxhp}${m.cond ? ' · ' + COND[m.cond].tag : ''}`
 });
 
+// Usa un objeto curativo SIN gastar turno. Si hay varios posibles, pregunta en quién.
+async function quickItem(key) {
+  const targets = itemTargets(key);
+  if (!targets.length) return showMenu();
+  let t = targets.includes(cur()) ? cur() : targets.length === 1 ? targets[0] : null;
+  if (!t) {
+    const i = await choose(`¿En quién usas ${ITEMS[key].name}?`, targets.map(monOption), true);
+    if (i < 0) return showMenu();
+    t = targets[i];
+  }
+  $('#menu').innerHTML = '';
+  await useItem(key, t);
+  save();
+  showMenu();
+}
+
 function showMenu() {
+  // Objetos que se pueden usar ahora mismo, a un clic (no gastan turno).
+  const quick = Object.keys(S.bag)
+    .filter(k => S.bag[k] > 0 && !BALLS.includes(k) && itemTargets(k).length)
+    .map(k => ({ label: `${ITEMS[k].icon} ${ITEMS[k].name} x${S.bag[k]}`, sub: `${ITEMS[k].desc} · no gasta turno`, color: '#22c55e', fn: () => quickItem(k) }));
   menu(`¿Qué hará ${nm(cur())}?`, [
     { label: '⚔️ Luchar', fn: showMoves },
-    { label: '🎒 Mochila', fn: showBag },
+    { label: '🎒 Mochila', sub: 'Bolas y todos los objetos', fn: showBag },
     { label: '🔁 Equipo', fn: showTeam },
-    { label: '🏳️ Rendirse', sub: 'Termina y cobra monedas', fn: surrender }
+    { label: '🏳️ Rendirse', sub: 'Termina y cobra monedas', fn: surrender },
+    ...quick
   ]);
 }
 
@@ -912,14 +1114,9 @@ function showBag() {
     const targets = isBall ? null : itemTargets(k);
     return {
       label: `${ITEMS[k].icon} ${ITEMS[k].name} x${S.bag[k]}`,
-      sub: ITEMS[k].desc,
+      sub: isBall ? `${ITEMS[k].desc} · gasta turno` : `${ITEMS[k].desc} · no gasta turno`,
       disabled: !isBall && !targets.length,
-      fn: async () => {
-        if (isBall) return doTurn({ kind: 'ball', key: k });
-        const i = await choose('¿En quién?', targets.map(monOption), true);
-        if (i < 0) return showBag();
-        doTurn({ kind: 'item', key: k, target: targets[i] });
-      }
+      fn: () => (isBall ? doTurn({ kind: 'ball', key: k }) : quickItem(k))
     };
   }), showMenu);
 }
